@@ -1,0 +1,13 @@
+services:
+  backend:
+    build:
+      context: ../backend
+    image: backend:dev
+
+  frontend:
+    build:
+      context: ../frontend
+    image: frontend:dev
+    ports:
+      - "80:80"
+

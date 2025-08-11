@@ -1,0 +1,14 @@
+services:
+  backend:
+    image: ${REGISTRY}/${REPO}/backend:${IMAGE_TAG}
+    restart: unless-stopped
+
+  frontend:
+    image: ${REGISTRY}/${REPO}/frontend:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    environment:
+      - NGINX_PORT=80
