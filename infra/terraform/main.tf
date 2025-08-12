@@ -42,6 +42,17 @@ resource "google_compute_firewall" "allow_ssh" {
   source_ranges = ["0.0.0.0/0"]
 }
 
+# (Opcional) Firewall HTTPS
+resource "google_compute_firewall" "allow_https" {
+  name    = "allow-https"
+  network = google_compute_network.default.name
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+}
+
 # VM con Docker preinstalado
 resource "google_compute_instance" "vm" {
   name         = var.instance_name
@@ -60,10 +71,8 @@ resource "google_compute_instance" "vm" {
 
   metadata = {
     ssh-keys                = "${var.ssh_user}:${var.ssh_public_key}"
-    metadata_startup_script = file("${path.module}/startup.sh")
+    metadata_startup_script = templatefile("${path.module}/startup.sh.tftpl", {
+      ssh_user = var.ssh_user
+    })
   }
-}
-
-output "instance_ip" {
-  value = google_compute_instance.vm.network_interface[0].access_config[0].nat_ip
 }
