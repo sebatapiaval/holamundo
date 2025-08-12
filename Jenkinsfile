@@ -15,27 +15,40 @@ pipeline {
   options { timestamps(); ansiColor('xterm') }
 
   stages {
-    stage('Set Tag') {
-      steps {
-        script {
-          // 1) Intentar con la var inyectada por Jenkins
-          def sha = (env.GIT_COMMIT && env.GIT_COMMIT.size() >= 7) ? env.GIT_COMMIT.take(7) : ''
+stage('Set Tag') {
+  steps {
+    script {
+      // Calcula el tag en bash y lo devuelve por stdout
+      def tag = sh(script: '''
+        set -e
+        TAG=""
+        # 1) Si Jenkins expuso GIT_COMMIT, usar sus 7 primeros chars
+        if [ -n "$GIT_COMMIT" ]; then
+          TAG="${GIT_COMMIT:0:7}"
+        fi
+        # 2) Si sigue vacío, intentar con git rev-parse
+        if [ -z "$TAG" ]; then
+          TAG="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"
+        fi
+        # 3) Fallbacks finales: BUILD_NUMBER o timestamp UTC
+        if [ -z "$TAG" ]; then
+          if [ -n "$BUILD_NUMBER" ]; then
+            TAG="$BUILD_NUMBER"
+          else
+            TAG="latest-$(date -u +%Y%m%d%H%M%S)"
+          fi
+        fi
+        # devolver sin salto de línea
+        printf "%s" "$TAG"
+      ''', returnStdout: true).trim()
 
-          // 2) Si no hay, intentar desde git
-          if (!sha?.trim()) {
-            sh 'git fetch --all --tags || true'
-            sha = sh(script: 'git rev-parse --short=7 HEAD || true', returnStdout: true).trim()
-          }
-
-          // 3) Fallbacks finales
-          def fallback = env.BUILD_NUMBER ?: "latest-${new Date().format('yyyyMMddHHmmss', TimeZone.getTimeZone('UTC'))}"
-          env.IMAGE_TAG = (sha?.trim()) ? sha.trim() : fallback
-
-          echo "GIT_COMMIT visto por Jenkins: ${env.GIT_COMMIT ?: '(no definido)'}"
-          echo "Image tag calculado: ${env.IMAGE_TAG}"
-        }
-      }
+      env.IMAGE_TAG = tag
+      echo "GIT_COMMIT visto por Jenkins: ${env.GIT_COMMIT ?: '(no definido)'}"
+      echo "Image tag calculado: ${env.IMAGE_TAG}"
     }
+  }
+}
+
 
     stage('Prepare SSH key (if missing)') {
       steps {
