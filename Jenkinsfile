@@ -2,25 +2,28 @@ pipeline {
   agent any
 
   environment {
-    REGISTRY = "docker.io"
-    REPO     = "sebatapiaval/holamundo"
+    REGISTRY = 'docker.io'
+    REPO     = 'sebatapiaval/holamundo'
     IMAGE_TAG = ''
-    TF_DIR = 'infra/terraform'
-    SSH_USER = 'ubuntu'
+    TF_DIR   = 'infra/terraform'
+    SSH_USER = 'ubuntu'                 // <- si tu imagen es Debian, usa 'debian'
     SSH_DIR  = "${WORKSPACE}/.ssh"
     SSH_KEY  = "${WORKSPACE}/.ssh/id_rsa"
     SSH_PUB  = "${WORKSPACE}/.ssh/id_rsa.pub"
   }
 
   options { timestamps(); ansiColor('xterm') }
+  // Usamos el checkout automático del Declarative (no añadimos stage de Checkout)
+  // Si quisieras controlar el checkout, puedes usar: options { skipDefaultCheckout(true) } y crear tu stage propio.
 
   stages {
-    stage('Checkout') {
-      steps { checkout scm }
-    }
-
     stage('Set Tag') {
-      steps { script { IMAGE_TAG = env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER } }
+      steps {
+        script {
+          env.IMAGE_TAG = (env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER)
+          echo "Image tag: ${env.IMAGE_TAG}"
+        }
+      }
     }
 
     stage('Prepare SSH key (if missing)') {
@@ -42,20 +45,22 @@ pipeline {
     stage('Docker Build') {
       steps {
         sh '''
-        docker build -t $REGISTRY/$REPO/backend:$IMAGE_TAG backend
-        docker build -t $REGISTRY/$REPO/frontend:$IMAGE_TAG frontend
+          set -e
+          docker build -t $REGISTRY/$REPO/backend:$IMAGE_TAG backend
+          docker build -t $REGISTRY/$REPO/frontend:$IMAGE_TAG frontend
         '''
       }
     }
 
     stage('Docker Login + Push') {
-      environment { DOCKERHUB = credentials('dockerhub-cred') }
+      environment { DOCKERHUB = credentials('dockerhub-cred') } // expone DOCKERHUB_USR y DOCKERHUB_PSW
       steps {
         sh '''
-        echo "$DOCKERHUB_PSW" | docker login -u "$DOCKERHUB_USR" --password-stdin $REGISTRY
-        docker push $REGISTRY/$REPO/backend:$IMAGE_TAG
-        docker push $REGISTRY/$REPO/frontend:$IMAGE_TAG
-        docker logout $REGISTRY || true
+          set -e
+          echo "$DOCKERHUB_PSW" | docker login -u "$DOCKERHUB_USR" --password-stdin $REGISTRY
+          docker push $REGISTRY/$REPO/backend:$IMAGE_TAG
+          docker push $REGISTRY/$REPO/frontend:$IMAGE_TAG
+          docker logout $REGISTRY || true
         '''
       }
     }
@@ -66,12 +71,13 @@ pipeline {
         withCredentials([file(credentialsId: 'gcp-sa-key', variable: 'GOOGLE_CLOUD_KEY')]) {
           dir(TF_DIR) {
             sh '''
-            terraform init -input=false
-            terraform apply -input=false -auto-approve \
-              -var="project_id=apiux-lab-devops" \
-              -var="credentials_file=$GOOGLE_CLOUD_KEY" \
-              -var="ssh_user=$SSH_USER" \
-              -var="ssh_public_key=$(cat "$SSH_PUB")"
+              set -e
+              terraform init -input=false
+              terraform apply -input=false -auto-approve \
+                -var="project_id=apiux-lab-devops" \
+                -var="credentials_file=$GOOGLE_CLOUD_KEY" \
+                -var="ssh_user=$SSH_USER" \
+                -var="ssh_public_key=$(cat "$SSH_PUB")"
             '''
           }
         }
@@ -90,19 +96,20 @@ pipeline {
     stage('Deploy via SSH (docker compose)') {
       steps {
         sh '''
-        # .env para compose con las imágenes recién publicadas
-        cat > deploy/.env <<EOF
+          set -e
+          # .env para compose con las imágenes recién publicadas
+          cat > deploy/.env <<EOF
 REGISTRY=$REGISTRY
 REPO=$REPO
 IMAGE_TAG=$IMAGE_TAG
 EOF
 
-        # Copiar compose y .env
-        scp -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy/docker-compose.yml deploy/.env $SSH_USER@$INSTANCE_IP:~/
+          # Copiar compose y .env
+          scp -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy/docker-compose.yml deploy/.env $SSH_USER@$INSTANCE_IP:~/
 
-        # Levantar en la VM
-        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no $SSH_USER@$INSTANCE_IP \
-          "docker compose pull && docker compose up -d && docker compose ps"
+          # Levantar en la VM
+          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no $SSH_USER@$INSTANCE_IP \
+            "docker compose pull && docker compose up -d && docker compose ps"
         '''
       }
     }
