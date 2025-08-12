@@ -18,18 +18,20 @@ pipeline {
 stage('Set Tag') {
   steps {
     script {
-      // Calcula el tag en bash y lo devuelve por stdout
       def tag = sh(script: '''
         set -e
         TAG=""
-        # 1) Si Jenkins expuso GIT_COMMIT, usar sus 7 primeros chars
+
+        # 1) Si Jenkins expuso GIT_COMMIT, tomar primeros 7 chars de forma POSIX
         if [ -n "$GIT_COMMIT" ]; then
-          TAG="${GIT_COMMIT:0:7}"
+          TAG="$(printf '%s' "$GIT_COMMIT" | cut -c1-7)"
         fi
+
         # 2) Si sigue vacío, intentar con git rev-parse
         if [ -z "$TAG" ]; then
           TAG="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"
         fi
+
         # 3) Fallbacks finales: BUILD_NUMBER o timestamp UTC
         if [ -z "$TAG" ]; then
           if [ -n "$BUILD_NUMBER" ]; then
@@ -38,6 +40,7 @@ stage('Set Tag') {
             TAG="latest-$(date -u +%Y%m%d%H%M%S)"
           fi
         fi
+
         # devolver sin salto de línea
         printf "%s" "$TAG"
       ''', returnStdout: true).trim()
@@ -48,6 +51,7 @@ stage('Set Tag') {
     }
   }
 }
+
 
 
     stage('Prepare SSH key (if missing)') {
