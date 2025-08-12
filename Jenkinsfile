@@ -1,6 +1,13 @@
 pipeline {
   agent any
 
+  parameters {
+    booleanParam(name: 'RUN_BUILD',  defaultValue: true,  description: 'Construir imágenes Docker')
+    booleanParam(name: 'RUN_PUSH',   defaultValue: false, description: 'Hacer login y push a Docker Hub')
+    booleanParam(name: 'RUN_TF',     defaultValue: false, description: 'Aplicar Terraform')
+    booleanParam(name: 'RUN_DEPLOY', defaultValue: false, description: 'Desplegar vía SSH')
+  }
+
   environment {
     REGISTRY   = 'docker.io'
     REPO       = 'sebatapiaval/holamundo'
@@ -15,46 +22,46 @@ pipeline {
   options { timestamps(); ansiColor('xterm') }
 
   stages {
-stage('Set Tag') {
-  steps {
-    script {
-      def tag = sh(script: '''
-        set -e
-        TAG=""
+    stage('Set Tag') {
+      steps {
+        script {
+          def tag = sh(script: '''
+            set -e
+            TAG=""
+            if [ -n "$GIT_COMMIT" ]; then
+              TAG="$(printf '%s' "$GIT_COMMIT" | cut -c1-7)"
+            fi
+            if [ -z "$TAG" ]; then
+              TAG="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"
+            fi
+            if [ -z "$TAG" ]; then
+              if [ -n "$BUILD_NUMBER" ]; then TAG="$BUILD_NUMBER"; else TAG="latest-$(date -u +%Y%m%d%H%M%S)"; fi
+            fi
+            printf "%s" "$TAG"
+          ''', returnStdout: true).trim()
 
-        # 1) Si Jenkins expuso GIT_COMMIT, tomar primeros 7 chars de forma POSIX
-        if [ -n "$GIT_COMMIT" ]; then
-          TAG="$(printf '%s' "$GIT_COMMIT" | cut -c1-7)"
-        fi
-
-        # 2) Si sigue vacío, intentar con git rev-parse
-        if [ -z "$TAG" ]; then
-          TAG="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"
-        fi
-
-        # 3) Fallbacks finales: BUILD_NUMBER o timestamp UTC
-        if [ -z "$TAG" ]; then
-          if [ -n "$BUILD_NUMBER" ]; then
-            TAG="$BUILD_NUMBER"
-          else
-            TAG="latest-$(date -u +%Y%m%d%H%M%S)"
-          fi
-        fi
-
-        # devolver sin salto de línea
-        printf "%s" "$TAG"
-      ''', returnStdout: true).trim()
-
-      env.IMAGE_TAG = tag
-      echo "GIT_COMMIT visto por Jenkins: ${env.GIT_COMMIT ?: '(no definido)'}"
-      echo "Image tag calculado: ${env.IMAGE_TAG}"
+          env.IMAGE_TAG = tag
+          echo "GIT_COMMIT: ${env.GIT_COMMIT ?: '(no definido)'}"
+          echo "IMAGE_TAG: ${env.IMAGE_TAG}"
+        }
+      }
     }
-  }
-}
 
-
+    stage('Preflight (versiones)') {
+      steps {
+        sh '''
+          set -e
+          echo "== Verificando herramientas en el agente =="
+          git --version || true
+          docker version || true
+          terraform version || true
+          ssh -V || true
+        '''
+      }
+    }
 
     stage('Prepare SSH key (if missing)') {
+      when { expression { params.RUN_DEPLOY || params.RUN_TF || true } } // usualmente igual conviene tenerla
       steps {
         sh '''
           set -e
@@ -71,12 +78,11 @@ stage('Set Tag') {
     }
 
     stage('Docker Build') {
+      when { expression { params.RUN_BUILD } }
       steps {
         sh '''
           set -e
-          if [ -z "$IMAGE_TAG" ]; then
-            echo "ERROR: IMAGE_TAG está vacío"; exit 1
-          fi
+          [ -n "$IMAGE_TAG" ] || { echo "ERROR: IMAGE_TAG vacío"; exit 1; }
           docker build -t "$REGISTRY/$REPO/backend:$IMAGE_TAG" backend
           docker build -t "$REGISTRY/$REPO/frontend:$IMAGE_TAG" frontend
         '''
@@ -84,13 +90,12 @@ stage('Set Tag') {
     }
 
     stage('Docker Login + Push') {
-      environment { DOCKERHUB = credentials('dockerhub-cred') } // DOCKERHUB_USR / DOCKERHUB_PSW
+      when { expression { params.RUN_PUSH } }
+      environment { DOCKERHUB = credentials('dockerhub-cred') }
       steps {
         sh '''
           set -e
-          if [ -z "$IMAGE_TAG" ]; then
-            echo "ERROR: IMAGE_TAG está vacío"; exit 1
-          fi
+          [ -n "$IMAGE_TAG" ] || { echo "ERROR: IMAGE_TAG vacío"; exit 1; }
           echo "$DOCKERHUB_PSW" | docker login -u "$DOCKERHUB_USR" --password-stdin "$REGISTRY"
           docker push "$REGISTRY/$REPO/backend:$IMAGE_TAG"
           docker push "$REGISTRY/$REPO/frontend:$IMAGE_TAG"
@@ -100,6 +105,7 @@ stage('Set Tag') {
     }
 
     stage('Terraform Apply (Infra)') {
+      when { expression { params.RUN_TF } }
       environment { TF_IN_AUTOMATION = 'true' }
       steps {
         withCredentials([file(credentialsId: 'gcp-sa-key', variable: 'GOOGLE_CLOUD_KEY')]) {
@@ -111,7 +117,7 @@ stage('Set Tag') {
                 -var="project_id=apiux-lab-devops" \
                 -var="credentials_file=$GOOGLE_CLOUD_KEY" \
                 -var="ssh_user=$SSH_USER" \
-                -var="ssh_public_key=$(cat "$SSH_PUB")"
+                -var="ssh_public_key=$(tr -d '\\n' < "$SSH_PUB")"
             '''
           }
         }
@@ -119,29 +125,24 @@ stage('Set Tag') {
     }
 
     stage('Get VM IP') {
+      when { expression { params.RUN_DEPLOY || params.RUN_TF } }
       steps {
         script {
           env.INSTANCE_IP = sh(script: "cd $TF_DIR && terraform output -raw instance_ip", returnStdout: true).trim()
-          if (!env.INSTANCE_IP) {
-            error("No se obtuvo la IP de la VM desde Terraform.")
-          }
+          if (!env.INSTANCE_IP) { error("No se obtuvo la IP de la VM desde Terraform.") }
           echo "VM IP: ${env.INSTANCE_IP}"
         }
       }
     }
 
     stage('Deploy via SSH (docker compose)') {
+      when { expression { params.RUN_DEPLOY } }
       steps {
         sh '''
           set -e
-          if [ -z "$IMAGE_TAG" ]; then
-            echo "ERROR: IMAGE_TAG está vacío"; exit 1
-          fi
-          if [ -z "$INSTANCE_IP" ]; then
-            echo "ERROR: INSTANCE_IP está vacío"; exit 1
-          fi
+          [ -n "$IMAGE_TAG" ]   || { echo "ERROR: IMAGE_TAG vacío"; exit 1; }
+          [ -n "$INSTANCE_IP" ] || { echo "ERROR: INSTANCE_IP vacío"; exit 1; }
 
-          # .env para compose con las imágenes recién publicadas
           mkdir -p deploy
           cat > deploy/.env <<EOF
 REGISTRY=$REGISTRY
@@ -149,27 +150,16 @@ REPO=$REPO
 IMAGE_TAG=$IMAGE_TAG
 EOF
 
-          # Copiar compose y .env
           scp -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy/docker-compose.yml deploy/.env "$SSH_USER@$INSTANCE_IP:~/"
-
-          # Levantar en la VM
-          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$INSTANCE_IP" \
-            "docker compose pull && docker compose up -d && docker compose ps"
+          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$INSTANCE_IP" "docker compose pull && docker compose up -d && docker compose ps"
         '''
       }
     }
   }
 
   post {
-    success {
-      echo "✅ Deploy OK: http://${env.INSTANCE_IP} (tag: ${env.IMAGE_TAG})"
-    }
-    failure {
-      echo '❌ Falló el pipeline'
-    }
-    always {
-      // En Groovy, usa env.VAR (no $VAR)
-      echo "Log: IMAGE_TAG=${env.IMAGE_TAG}; INSTANCE_IP=${env.INSTANCE_IP}; GIT_COMMIT=${env.GIT_COMMIT}"
-    }
+    success { echo "✅ OK: http://${env.INSTANCE_IP ?: 'N/A'} (tag: ${env.IMAGE_TAG})" }
+    failure { echo '❌ Falló el pipeline' }
+    always  { echo "Log: IMAGE_TAG=${env.IMAGE_TAG}; INSTANCE_IP=${env.INSTANCE_IP}; GIT_COMMIT=${env.GIT_COMMIT}" }
   }
 }
