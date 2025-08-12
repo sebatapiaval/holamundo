@@ -3,7 +3,7 @@ pipeline {
 
   environment {
     REGISTRY = 'docker.io'
-    REPO     = 'sebatapiaval/holamundo'   // un solo repo en Docker Hub
+    REPO     = 'sebatapiaval/holamundo'   // repo único con tags backend/frontend
     TF_DIR   = 'infra/terraform'
 
     SSH_USER = 'ubuntu'
@@ -75,7 +75,6 @@ pipeline {
             sh '''
               set -e
               terraform init -input=false
-              # Pasar la clave pública sin saltos de línea
               PUB_KEY="$(tr -d '\\n' < "$SSH_PUB")"
               terraform apply -input=false -auto-approve \
                 -var="project_id=apiux-lab-devops" \
@@ -106,7 +105,6 @@ pipeline {
           echo "Esperando 120 segundos para que la VM termine de iniciar..."
           sleep 120
 
-          # Reintentos de SSH (10 intentos / 5s = 50s extra)
           echo "Verificando conexión SSH a $INSTANCE_IP ..."
           for i in $(seq 1 10); do
             if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_USER@$INSTANCE_IP" "echo ready" >/dev/null 2>&1; then
@@ -117,13 +115,40 @@ pipeline {
             sleep 5
           done
 
-          # Verificación final (si no conectó, aborta con error claro)
-          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_USER@$INSTANCE_IP" "echo conectado" >/dev/null
+          # Esperar a que cloud-init termine (si existe)
+          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$INSTANCE_IP" \
+            'if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init status --wait || true; fi'
 
-          # Copiar compose de producción (imágenes con tags fijos backend/frontend-latest)
+          # Instalar Docker en caliente si no está (idempotente)
+          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$INSTANCE_IP" '
+            set -e
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "Docker no está, instalando..."
+              sudo apt-get update -y
+              sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              sudo chmod a+r /etc/apt/keyrings/docker.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+              sudo apt-get update -y
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              sudo usermod -aG docker '"$SSH_USER"' || true
+              sudo systemctl enable docker --now
+              echo "Docker instalado."
+            else
+              echo "Docker ya está instalado."
+              # asegurar compose plugin
+              if ! docker compose version >/dev/null 2>&1; then
+                echo "Instalando plugin docker compose..."
+                sudo apt-get update -y
+                sudo apt-get install -y docker-compose-plugin
+              fi
+            fi
+          '
+
+          # Copiar docker-compose.yml y desplegar (pull always)
           scp -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy/docker-compose.yml "$SSH_USER@$INSTANCE_IP:~/"
 
-          # Levantar siempre la última imagen
           ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$INSTANCE_IP" \
             "docker compose up -d --pull always && docker compose ps"
         '''
