@@ -6,7 +6,7 @@ pipeline {
     REPO       = 'sebatapiaval/holamundo'
     IMAGE_TAG  = ''
     TF_DIR     = 'infra/terraform'
-    SSH_USER   = 'ubuntu'                 // Si tu VM es Debian, cámbialo a 'debian'
+    SSH_USER   = 'ubuntu'
     SSH_DIR    = "${WORKSPACE}/.ssh"
     SSH_KEY    = "${WORKSPACE}/.ssh/id_rsa"
     SSH_PUB    = "${WORKSPACE}/.ssh/id_rsa.pub"
@@ -18,14 +18,20 @@ pipeline {
     stage('Set Tag') {
       steps {
         script {
-          // Asegura metadata git incluso en lightweight checkouts (no rompe si no aplica)
-          sh 'git fetch --all --tags || true'
+          // 1) Intentar con la var inyectada por Jenkins
+          def sha = (env.GIT_COMMIT && env.GIT_COMMIT.size() >= 7) ? env.GIT_COMMIT.take(7) : ''
 
-          // Intenta obtener commit corto; si falla, usa BUILD_NUMBER; si no existe, usa timestamp UTC
-          def sha = sh(script: 'git rev-parse --short=7 HEAD || true', returnStdout: true).trim()
+          // 2) Si no hay, intentar desde git
+          if (!sha?.trim()) {
+            sh 'git fetch --all --tags || true'
+            sha = sh(script: 'git rev-parse --short=7 HEAD || true', returnStdout: true).trim()
+          }
+
+          // 3) Fallbacks finales
           def fallback = env.BUILD_NUMBER ?: "latest-${new Date().format('yyyyMMddHHmmss', TimeZone.getTimeZone('UTC'))}"
-          env.IMAGE_TAG = (sha ?: fallback).toString()
+          env.IMAGE_TAG = (sha?.trim()) ? sha.trim() : fallback
 
+          echo "GIT_COMMIT visto por Jenkins: ${env.GIT_COMMIT ?: '(no definido)'}"
           echo "Image tag calculado: ${env.IMAGE_TAG}"
         }
       }
@@ -61,7 +67,7 @@ pipeline {
     }
 
     stage('Docker Login + Push') {
-      environment { DOCKERHUB = credentials('dockerhub-cred') } // variables: DOCKERHUB_USR / DOCKERHUB_PSW
+      environment { DOCKERHUB = credentials('dockerhub-cred') } // DOCKERHUB_USR / DOCKERHUB_PSW
       steps {
         sh '''
           set -e
@@ -139,13 +145,14 @@ EOF
 
   post {
     success {
-      echo "✅ Deploy OK: http://$INSTANCE_IP (tag: $IMAGE_TAG)"
+      echo "✅ Deploy OK: http://${env.INSTANCE_IP} (tag: ${env.IMAGE_TAG})"
     }
     failure {
       echo '❌ Falló el pipeline'
     }
     always {
-      echo "Log: IMAGE_TAG=$IMAGE_TAG; INSTANCE_IP=$INSTANCE_IP"
+      // En Groovy, usa env.VAR (no $VAR)
+      echo "Log: IMAGE_TAG=${env.IMAGE_TAG}; INSTANCE_IP=${env.INSTANCE_IP}; GIT_COMMIT=${env.GIT_COMMIT}"
     }
   }
 }
