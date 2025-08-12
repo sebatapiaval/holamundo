@@ -6,21 +6,21 @@ pipeline {
     REPO     = 'sebatapiaval/holamundo'
     IMAGE_TAG = ''
     TF_DIR   = 'infra/terraform'
-    SSH_USER = 'ubuntu'                 // <- si tu imagen es Debian, usa 'debian'
+    SSH_USER = 'ubuntu'                 // Si tu VM es Debian, cámbialo a 'debian'
     SSH_DIR  = "${WORKSPACE}/.ssh"
     SSH_KEY  = "${WORKSPACE}/.ssh/id_rsa"
     SSH_PUB  = "${WORKSPACE}/.ssh/id_rsa.pub"
   }
 
   options { timestamps(); ansiColor('xterm') }
-  // Usamos el checkout automático del Declarative (no añadimos stage de Checkout)
-  // Si quisieras controlar el checkout, puedes usar: options { skipDefaultCheckout(true) } y crear tu stage propio.
 
   stages {
     stage('Set Tag') {
       steps {
         script {
-          env.IMAGE_TAG = (env.GIT_COMMIT?.take(7) ?: env.BUILD_NUMBER)
+          // Obtiene el commit actual (7 chars). Si no se puede, usa BUILD_NUMBER.
+          def sha = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+          env.IMAGE_TAG = sha ?: env.BUILD_NUMBER
           echo "Image tag: ${env.IMAGE_TAG}"
         }
       }
@@ -53,7 +53,7 @@ pipeline {
     }
 
     stage('Docker Login + Push') {
-      environment { DOCKERHUB = credentials('dockerhub-cred') } // expone DOCKERHUB_USR y DOCKERHUB_PSW
+      environment { DOCKERHUB = credentials('dockerhub-cred') } // DOCKERHUB_USR / DOCKERHUB_PSW
       steps {
         sh '''
           set -e
