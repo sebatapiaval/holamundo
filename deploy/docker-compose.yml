@@ -1,16 +1,14 @@
 services:
   backend:
-    image: ${REGISTRY}/${REPO}/backend:${IMAGE_TAG}
+    image: docker.io/sebatapiaval/holamundo:backend-latest
     restart: unless-stopped
     pull_policy: always
 
   frontend:
-    image: ${REGISTRY}/${REPO}/frontend:${IMAGE_TAG}
+    image: docker.io/sebatapiaval/holamundo:frontend-latest
     restart: unless-stopped
     pull_policy: always
     depends_on:
       - backend
     ports:
       - "80:80"
-    environment:
-      - NGINX_PORT=80

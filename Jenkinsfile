@@ -2,14 +2,13 @@ pipeline {
   agent any
 
   environment {
-    REGISTRY   = 'docker.io'
-    REPO       = 'sebatapiaval/holamundo'
-    IMAGE_TAG  = 'latest'                 // Tag fijo
-    TF_DIR     = 'infra/terraform'
-    SSH_USER   = 'ubuntu'
-    SSH_DIR    = "${WORKSPACE}/.ssh"
-    SSH_KEY    = "${WORKSPACE}/.ssh/id_rsa"
-    SSH_PUB    = "${WORKSPACE}/.ssh/id_rsa.pub"
+    REGISTRY       = 'docker.io'
+    REPO           = 'sebatapiaval/holamundo'   // un solo repo en Docker Hub
+    TF_DIR         = 'infra/terraform'
+    SSH_USER       = 'ubuntu'
+    SSH_DIR        = "${WORKSPACE}/.ssh"
+    SSH_KEY        = "${WORKSPACE}/.ssh/id_rsa"
+    SSH_PUB        = "${WORKSPACE}/.ssh/id_rsa.pub"
   }
 
   options { timestamps(); ansiColor('xterm') }
@@ -35,8 +34,8 @@ pipeline {
       steps {
         sh '''
           set -e
-          docker build -t "$REGISTRY/$REPO/backend:$IMAGE_TAG" backend
-          docker build -t "$REGISTRY/$REPO/frontend:$IMAGE_TAG" frontend
+          docker build -t "$REGISTRY/$REPO:backend-latest"  backend
+          docker build -t "$REGISTRY/$REPO:frontend-latest" frontend
         '''
       }
     }
@@ -47,8 +46,8 @@ pipeline {
         sh '''
           set -e
           echo "$DOCKERHUB_PSW" | docker login -u "$DOCKERHUB_USR" --password-stdin "$REGISTRY"
-          docker push "$REGISTRY/$REPO/backend:$IMAGE_TAG"
-          docker push "$REGISTRY/$REPO/frontend:$IMAGE_TAG"
+          docker push "$REGISTRY/$REPO:backend-latest"
+          docker push "$REGISTRY/$REPO:frontend-latest"
           docker logout "$REGISTRY" || true
         '''
       }
@@ -88,18 +87,10 @@ pipeline {
         sh '''
           set -e
 
-          # .env para compose con las imágenes recién publicadas
-          mkdir -p deploy
-          cat > deploy/.env <<EOF
-REGISTRY=$REGISTRY
-REPO=$REPO
-IMAGE_TAG=$IMAGE_TAG
-EOF
+          # Copiar solo el docker-compose.yml (sin .env; las imágenes están hardcodeadas)
+          scp -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy/docker-compose.yml "$SSH_USER@$INSTANCE_IP:~/"
 
-          # Copiar compose y .env
-          scp -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy/docker-compose.yml deploy/.env "$SSH_USER@$INSTANCE_IP:~/"
-
-          # Levantar en la VM con always pull para latest
+          # Levantar en la VM bajando siempre la última imagen
           ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$INSTANCE_IP" \
             "docker compose up -d --pull always && docker compose ps"
         '''
@@ -108,8 +99,8 @@ EOF
   }
 
   post {
-    success { echo "✅ Deploy OK: http://${env.INSTANCE_IP} (tag: ${env.IMAGE_TAG})" }
+    success { echo "✅ Deploy OK: http://${env.INSTANCE_IP}" }
     failure { echo '❌ Falló el pipeline' }
-    always  { echo "Log: IMAGE_TAG=${env.IMAGE_TAG}; INSTANCE_IP=${env.INSTANCE_IP}" }
+    always  { echo "Log: INSTANCE_IP=${env.INSTANCE_IP}" }
   }
 }
