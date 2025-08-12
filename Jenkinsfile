@@ -2,18 +2,20 @@ pipeline {
   agent any
 
   environment {
-    REGISTRY       = 'docker.io'
-    REPO           = 'sebatapiaval/holamundo'   // un solo repo en Docker Hub
-    TF_DIR         = 'infra/terraform'
-    SSH_USER       = 'ubuntu'
-    SSH_DIR        = "${WORKSPACE}/.ssh"
-    SSH_KEY        = "${WORKSPACE}/.ssh/id_rsa"
-    SSH_PUB        = "${WORKSPACE}/.ssh/id_rsa.pub"
+    REGISTRY = 'docker.io'
+    REPO     = 'sebatapiaval/holamundo'   // un solo repo en Docker Hub
+    TF_DIR   = 'infra/terraform'
+
+    SSH_USER = 'ubuntu'
+    SSH_DIR  = "${WORKSPACE}/.ssh"
+    SSH_KEY  = "${WORKSPACE}/.ssh/id_rsa"
+    SSH_PUB  = "${WORKSPACE}/.ssh/id_rsa.pub"
   }
 
   options { timestamps(); ansiColor('xterm') }
 
   stages {
+
     stage('Prepare SSH key (if missing)') {
       steps {
         sh '''
@@ -53,6 +55,18 @@ pipeline {
       }
     }
 
+    stage('Terraform Validate') {
+      steps {
+        dir(TF_DIR) {
+          sh '''
+            set -e
+            terraform init -input=false -reconfigure
+            terraform validate
+          '''
+        }
+      }
+    }
+
     stage('Terraform Apply (Infra)') {
       environment { TF_IN_AUTOMATION = 'true' }
       steps {
@@ -61,11 +75,13 @@ pipeline {
             sh '''
               set -e
               terraform init -input=false
+              # Pasar la clave pública sin saltos de línea
+              PUB_KEY="$(tr -d '\\n' < "$SSH_PUB")"
               terraform apply -input=false -auto-approve \
                 -var="project_id=apiux-lab-devops" \
                 -var="credentials_file=$GOOGLE_CLOUD_KEY" \
                 -var="ssh_user=$SSH_USER" \
-                -var="ssh_public_key=$(tr -d '\\n' < "$SSH_PUB")"
+                -var="ssh_public_key=$PUB_KEY"
             '''
           }
         }
@@ -87,10 +103,27 @@ pipeline {
         sh '''
           set -e
 
-          # Copiar solo el docker-compose.yml (sin .env; las imágenes están hardcodeadas)
+          echo "Esperando 120 segundos para que la VM termine de iniciar..."
+          sleep 120
+
+          # Reintentos de SSH (10 intentos / 5s = 50s extra)
+          echo "Verificando conexión SSH a $INSTANCE_IP ..."
+          for i in $(seq 1 10); do
+            if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_USER@$INSTANCE_IP" "echo ready" >/dev/null 2>&1; then
+              echo "SSH OK en intento $i"
+              break
+            fi
+            echo "SSH aún no responde (intento $i). Reintentando en 5s..."
+            sleep 5
+          done
+
+          # Verificación final (si no conectó, aborta con error claro)
+          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_USER@$INSTANCE_IP" "echo conectado" >/dev/null
+
+          # Copiar compose de producción (imágenes con tags fijos backend/frontend-latest)
           scp -i "$SSH_KEY" -o StrictHostKeyChecking=no deploy/docker-compose.yml "$SSH_USER@$INSTANCE_IP:~/"
 
-          # Levantar en la VM bajando siempre la última imagen
+          # Levantar siempre la última imagen
           ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$INSTANCE_IP" \
             "docker compose up -d --pull always && docker compose ps"
         '''
